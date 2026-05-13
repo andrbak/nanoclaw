@@ -36,6 +36,7 @@ export interface ContainerConfig {
   imageTag?: string;
   additionalMounts: AdditionalMountConfig[];
   skills: string[] | 'all';
+  env?: Record<string, string>;
   provider?: string;
   groupName?: string;
   assistantName?: string;
@@ -56,6 +57,7 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     imageTag: row.image_tag ?? undefined,
     additionalMounts: JSON.parse(row.additional_mounts) as AdditionalMountConfig[],
     skills: JSON.parse(row.skills) as string[] | 'all',
+    env: row.env ? (JSON.parse(row.env) as Record<string, string>) : undefined,
     provider: row.provider ?? undefined,
     groupName: group.name,
     assistantName: row.assistant_name ?? group.name,

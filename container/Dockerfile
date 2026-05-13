@@ -10,7 +10,15 @@
 # bind mount at runtime (see src/container-runner.ts). Source-only changes
 # never require an image rebuild.
 
-FROM node:22-slim
+# ---- Python tool stage -------------------------------------------------------
+# aula requires Python >=3.14. Install it in the official Python image so we
+# can copy just the runtime + site-packages into the Node base below.
+FROM python:3.14-slim AS python-tools
+ARG AULA_VERSION=1.3.1
+RUN pip install --no-cache-dir "aula==${AULA_VERSION}"
+
+# ---- Main image --------------------------------------------------------------
+FROM node:22-trixie-slim
 
 # ---- Build-time arguments ----------------------------------------------------
 # CJK fonts add ~200MB. Opt in only if you render Chinese/Japanese/Korean text.
@@ -23,6 +31,15 @@ ARG CLAUDE_CODE_VERSION=2.1.128
 ARG AGENT_BROWSER_VERSION=latest
 ARG VERCEL_VERSION=52.2.1
 ARG BUN_VERSION=1.3.12
+ARG AULA_VERSION=1.3.1
+
+# Copy Python 3.14 runtime and aula from the build stage.
+# Both images are Debian Bookworm so shared libs are compatible.
+COPY --from=python-tools /usr/local/bin/python3.14 /usr/local/bin/python3.14
+COPY --from=python-tools /usr/local/lib/python3.14 /usr/local/lib/python3.14
+COPY --from=python-tools /usr/local/lib/libpython3.14.so.1.0 /usr/local/lib/libpython3.14.so.1.0
+COPY --from=python-tools /usr/local/bin/aula /usr/local/bin/aula
+RUN ldconfig
 
 # ---- System dependencies -----------------------------------------------------
 # tini: correct PID 1 / signal forwarding so outbound.db writes finalize on

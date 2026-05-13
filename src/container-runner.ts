@@ -252,9 +252,11 @@ function buildMounts(
   // is a no-op for groups that have spawned before.
   initGroupFilesystem(agentGroup);
 
+  const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
+
   // Sync skill symlinks based on container.json selection before mounting.
   const claudeDir = path.join(DATA_DIR, 'v2-sessions', agentGroup.id, '.claude-shared');
-  syncSkillSymlinks(claudeDir, containerConfig);
+  syncSkillSymlinks(claudeDir, containerConfig, groupDir);
 
   // Compose CLAUDE.md fresh every spawn from the shared base, enabled skill
   // fragments, and MCP server instructions. See `claude-md-compose.ts`.
@@ -262,7 +264,6 @@ function buildMounts(
 
   const mounts: VolumeMount[] = [];
   const sessDir = sessionDir(agentGroup.id, session.id);
-  const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
 
   // Session folder at /workspace (contains inbound.db, outbound.db, outbox/, .claude/)
   mounts.push({ hostPath: sessDir, containerPath: '/workspace', readonly: false });
@@ -336,22 +337,27 @@ function buildMounts(
 
 /**
  * Sync skill symlinks in .claude-shared/skills/ to match the container.json
- * selection. Each symlink points to a container path (/app/skills/<name>)
- * so it's dangling on the host but valid inside the container.
+ * selection plus any per-group skills in groups/<folder>/skills/.
+ *
+ * Shared skills point to /app/skills/<name> (dangling on host, valid in container).
+ * Per-group skills point to /workspace/agent/skills/<name> (the group dir mount).
  */
-function syncSkillSymlinks(claudeDir: string, containerConfig: import('./container-config.js').ContainerConfig): void {
+function syncSkillSymlinks(
+  claudeDir: string,
+  containerConfig: import('./container-config.js').ContainerConfig,
+  groupDir: string,
+): void {
   const skillsDir = path.join(claudeDir, 'skills');
   if (!fs.existsSync(skillsDir)) {
     fs.mkdirSync(skillsDir, { recursive: true });
   }
 
-  // Determine desired skill set
+  // Determine desired shared skill set
   const projectRoot = process.cwd();
   const sharedSkillsDir = path.join(projectRoot, 'container', 'skills');
-  let desired: string[];
+  let sharedSkills: string[];
   if (containerConfig.skills === 'all') {
-    // Recompute from shared dir — newly-added upstream skills appear automatically
-    desired = fs.existsSync(sharedSkillsDir)
+    sharedSkills = fs.existsSync(sharedSkillsDir)
       ? fs.readdirSync(sharedSkillsDir).filter((e) => {
           try {
             return fs.statSync(path.join(sharedSkillsDir, e)).isDirectory();
@@ -361,10 +367,22 @@ function syncSkillSymlinks(claudeDir: string, containerConfig: import('./contain
         })
       : [];
   } else {
-    desired = containerConfig.skills;
+    sharedSkills = containerConfig.skills;
   }
 
-  const desiredSet = new Set(desired);
+  // Per-group skills from groups/<folder>/skills/ — mounted at /workspace/agent/skills/
+  const hostGroupSkillsDir = path.join(groupDir, 'skills');
+  const groupSkills: string[] = fs.existsSync(hostGroupSkillsDir)
+    ? fs.readdirSync(hostGroupSkillsDir).filter((e) => {
+        try {
+          return fs.statSync(path.join(hostGroupSkillsDir, e)).isDirectory();
+        } catch {
+          return false;
+        }
+      })
+    : [];
+
+  const desiredSet = new Set([...sharedSkills, ...groupSkills]);
 
   // Remove symlinks not in the desired set
   for (const entry of fs.readdirSync(skillsDir)) {
@@ -380,8 +398,8 @@ function syncSkillSymlinks(claudeDir: string, containerConfig: import('./contain
     }
   }
 
-  // Create symlinks for desired skills (container path targets)
-  for (const skill of desired) {
+  // Create symlinks for shared skills (container path /app/skills/<name>)
+  for (const skill of sharedSkills) {
     const linkPath = path.join(skillsDir, skill);
     let exists = false;
     try {
@@ -392,6 +410,21 @@ function syncSkillSymlinks(claudeDir: string, containerConfig: import('./contain
     }
     if (!exists) {
       fs.symlinkSync(`/app/skills/${skill}`, linkPath);
+    }
+  }
+
+  // Create symlinks for per-group skills (container path /workspace/agent/skills/<name>)
+  for (const skill of groupSkills) {
+    const linkPath = path.join(skillsDir, skill);
+    let exists = false;
+    try {
+      fs.lstatSync(linkPath);
+      exists = true;
+    } catch {
+      /* missing */
+    }
+    if (!exists) {
+      fs.symlinkSync(`/workspace/agent/skills/${skill}`, linkPath);
     }
   }
 }

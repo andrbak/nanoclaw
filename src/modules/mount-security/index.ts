@@ -189,29 +189,27 @@ function findAllowedRoot(realPath: string, allowedRoots: AllowedRoot[]): Allowed
 }
 
 /**
- * Validate the container path to prevent escaping /workspace/extra/
+ * Validate a relative container path (used when no explicit containerPath was
+ * given, so the path is derived from the host basename and prefixed with
+ * /workspace/extra/).
  */
-function isValidContainerPath(containerPath: string): boolean {
-  // Must not contain .. to prevent path traversal
-  if (containerPath.includes('..')) {
-    return false;
-  }
+function isValidRelativeContainerPath(containerPath: string): boolean {
+  if (containerPath.includes('..')) return false;
+  if (containerPath.startsWith('/')) return false;
+  if (!containerPath || containerPath.trim() === '') return false;
+  if (containerPath.includes(':')) return false;
+  return true;
+}
 
-  // Must not be absolute (it will be prefixed with /workspace/extra/)
-  if (containerPath.startsWith('/')) {
-    return false;
-  }
-
-  // Must not be empty
-  if (!containerPath || containerPath.trim() === '') {
-    return false;
-  }
-
-  // Must not contain colons — prevents Docker -v option injection (e.g., "repo:rw")
-  if (containerPath.includes(':')) {
-    return false;
-  }
-
+/**
+ * Validate an operator-specified absolute container path. The host path is
+ * already validated by the allowlist; this just guards against path-traversal
+ * tricks in the container path itself.
+ */
+function isValidAbsoluteContainerPath(containerPath: string): boolean {
+  if (containerPath.includes('..')) return false;
+  if (!containerPath.startsWith('/')) return false;
+  if (containerPath.includes(':')) return false;
   return true;
 }
 
@@ -221,6 +219,7 @@ export interface MountValidationResult {
   realHostPath?: string;
   resolvedContainerPath?: string;
   effectiveReadonly?: boolean;
+  explicitAbsolute?: boolean;
 }
 
 /**
@@ -238,15 +237,26 @@ export function validateMount(mount: AdditionalMount): MountValidationResult {
     };
   }
 
-  // Derive containerPath from hostPath basename if not specified
+  // Determine container path and whether it's operator-specified as absolute.
+  // Absolute container paths are used as-is (no /workspace/extra/ prefix).
+  // Relative paths (or paths derived from the host basename) get the prefix.
+  const explicitAbsolute = mount.containerPath?.startsWith('/') ?? false;
   const containerPath = mount.containerPath || path.basename(mount.hostPath);
 
-  // Validate container path (cheap check)
-  if (!isValidContainerPath(containerPath)) {
-    return {
-      allowed: false,
-      reason: `Invalid container path: "${containerPath}" - must be relative, non-empty, and not contain ".."`,
-    };
+  if (explicitAbsolute) {
+    if (!isValidAbsoluteContainerPath(containerPath)) {
+      return {
+        allowed: false,
+        reason: `Invalid absolute container path: "${containerPath}" - must not contain ".." or ":"`,
+      };
+    }
+  } else {
+    if (!isValidRelativeContainerPath(containerPath)) {
+      return {
+        allowed: false,
+        reason: `Invalid container path: "${containerPath}" - must be relative, non-empty, and not contain ".."`,
+      };
+    }
   }
 
   // Expand and resolve the host path
@@ -303,6 +313,7 @@ export function validateMount(mount: AdditionalMount): MountValidationResult {
     realHostPath: realPath,
     resolvedContainerPath: containerPath,
     effectiveReadonly,
+    explicitAbsolute,
   };
 }
 
@@ -329,9 +340,12 @@ export function validateAdditionalMounts(
     const result = validateMount(mount);
 
     if (result.allowed) {
+      const containerPath = result.explicitAbsolute
+        ? result.resolvedContainerPath!
+        : `/workspace/extra/${result.resolvedContainerPath}`;
       validatedMounts.push({
         hostPath: result.realHostPath!,
-        containerPath: `/workspace/extra/${result.resolvedContainerPath}`,
+        containerPath,
         readonly: result.effectiveReadonly!,
       });
 
